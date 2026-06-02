@@ -1,0 +1,1320 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>Penalty Swipe Soccer</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+html,body{width:100%;height:100%;overflow:hidden;background:#000;touch-action:none;
+  user-select:none;-webkit-user-select:none;-webkit-tap-highlight-color:transparent}
+canvas{display:block;position:fixed;top:0;left:0;touch-action:none}
+</style>
+</head>
+<body>
+<canvas id="C"></canvas>
+<script>
+// ================================================================
+//  PENALTY SWIPE SOCCER  -  Complete Rewrite
+// ================================================================
+var CV = document.getElementById('C');
+var CX = CV.getContext('2d');
+
+// Virtual canvas (portrait)
+var VW = 480, VH = 854;
+var cw, ch, SC, OX, OY;
+
+function resize() {
+  cw = CV.width  = window.innerWidth;
+  ch = CV.height = window.innerHeight;
+  SC = Math.min(cw / VW, ch / VH);
+  OX = (cw - VW * SC) / 2;
+  OY = (ch - VH * SC) / 2;
+}
+window.addEventListener('resize', resize);
+resize();
+
+function px(x) { return OX + x * SC; }
+function py(y) { return OY + y * SC; }
+function ps(s) { return s * SC; }
+function toV(cx, cy) { return { x: (cx - OX) / SC, y: (cy - OY) / SC }; }
+function clamp(v, lo, hi) { return v < lo ? lo : v > hi ? hi : v; }
+
+// ================================================================
+//  AUDIO
+// ================================================================
+var AC = null, muted = false;
+function getAC() {
+  if (!AC) AC = new (window.AudioContext || window.webkitAudioContext)();
+  if (AC.state === 'suspended') AC.resume();
+  return AC;
+}
+function tone(freq, dur, type, vol, delay) {
+  if (muted) return;
+  type = type || 'sine'; vol = vol || 0.2; delay = delay || 0;
+  var a = getAC(), o = a.createOscillator(), g = a.createGain();
+  o.type = type; o.frequency.value = freq;
+  g.gain.setValueAtTime(0, a.currentTime + delay);
+  g.gain.linearRampToValueAtTime(vol, a.currentTime + delay + 0.015);
+  g.gain.exponentialRampToValueAtTime(0.0001, a.currentTime + delay + dur);
+  o.connect(g); g.connect(a.destination);
+  o.start(a.currentTime + delay);
+  o.stop(a.currentTime + delay + dur + 0.02);
+}
+function sndKick() {
+  if (muted) return;
+  var a = getAC(), len = a.sampleRate * 0.14;
+  var b = a.createBuffer(1, len, a.sampleRate), d = b.getChannelData(0);
+  for (var i = 0; i < len; i++) d[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / len, 1.7);
+  var s = a.createBufferSource(), g = a.createGain();
+  g.gain.setValueAtTime(0.9, a.currentTime);
+  g.gain.exponentialRampToValueAtTime(0.001, a.currentTime + 0.14);
+  s.buffer = b; s.connect(g); g.connect(a.destination); s.start();
+}
+function sndGoal() {
+  // Melody fanfare
+  var notes = [523, 659, 784, 1047, 1319];
+  for (var i = 0; i < notes.length; i++) tone(notes[i], 0.55, 'sine', 0.2, i * 0.08);
+  // Crowd cheer
+  sndCrowdCheer();
+}
+function sndCrowdCheer() {
+  if (muted) return;
+  var a = getAC();
+  // Layered voices: low rumble + high excitement + mid chant
+  var layers = [
+    { freq: 220,  q: 0.5, vol: 0.12, dur: 2.5 },
+    { freq: 800,  q: 0.8, vol: 0.09, dur: 2.0 },
+    { freq: 1400, q: 1.2, vol: 0.06, dur: 1.5 }
+  ];
+  layers.forEach(function(L) {
+    var len = a.sampleRate * L.dur;
+    var buf = a.createBuffer(1, len, a.sampleRate), d = buf.getChannelData(0);
+    // Modulated noise = crowd voice
+    for (var i = 0; i < len; i++) {
+      var t = i / a.sampleRate;
+      d[i] = (Math.random() * 2 - 1) * (0.5 + 0.5 * Math.sin(t * 6.28 * 4));
+    }
+    var src = a.createBufferSource();
+    var filt = a.createBiquadFilter();
+    filt.type = 'bandpass'; filt.frequency.value = L.freq; filt.Q.value = L.q;
+    var gain = a.createGain();
+    gain.gain.setValueAtTime(0, a.currentTime);
+    gain.gain.linearRampToValueAtTime(L.vol, a.currentTime + 0.15);
+    gain.gain.setValueAtTime(L.vol, a.currentTime + L.dur * 0.6);
+    gain.gain.exponentialRampToValueAtTime(0.001, a.currentTime + L.dur);
+    src.buffer = buf;
+    src.connect(filt); filt.connect(gain); gain.connect(a.destination);
+    src.start();
+  });
+  // Whistle / horn burst
+  tone(1760, 0.3, 'square', 0.08, 0.1);
+  tone(1320, 0.25, 'square', 0.06, 0.4);
+  tone(1760, 0.3, 'square', 0.07, 0.7);
+}
+function sndSave() {
+  tone(320, 0.2, 'sawtooth', 0.25);
+  tone(180, 0.5, 'sine', 0.2, 0.1);
+  // Small crowd groan
+  if (muted) return;
+  var a = getAC(), len = a.sampleRate * 0.8;
+  var buf = a.createBuffer(1, len, a.sampleRate), d = buf.getChannelData(0);
+  for (var i = 0; i < len; i++) d[i] = (Math.random() * 2 - 1) * 0.08 * Math.sin(i / len * Math.PI);
+  var src = a.createBufferSource(), f = a.createBiquadFilter(), g = a.createGain();
+  f.type = 'bandpass'; f.frequency.value = 400; f.Q.value = 1.0;
+  g.gain.setValueAtTime(0.3, a.currentTime); g.gain.exponentialRampToValueAtTime(0.001, a.currentTime + 0.8);
+  src.buffer = buf; src.connect(f); f.connect(g); g.connect(a.destination); src.start();
+}
+function sndMiss() { tone(180, 0.4, 'triangle', 0.2); tone(100, 0.6, 'sine', 0.15, 0.12); }
+function sndClick() { tone(900, 0.06, 'sine', 0.12); }
+
+// ================================================================
+//  STATE
+// ================================================================
+var ST = { SPLASH: 0, IDLE: 1, AIM: 2, FLY: 3, RESULT: 4, OVER: 5 };
+var st = ST.SPLASH;
+var TOTAL = 5;
+var nShots = 0, nGoals = 0, nSaves = 0, nMiss = 0;
+
+// ================================================================
+//  GOAL POST (virtual coords)
+// ================================================================
+var GL = 108, GR = 372, GT = 188, GB = 318;
+var GCX = (GL + GR) / 2;      // 240
+var GW  = GR - GL;             // 264
+var GH  = GB - GT;             // 130
+
+// ================================================================
+//  BALL
+// ================================================================
+var BX0 = VW / 2, BY0 = VH - 145;   // 240, 709
+var ball = { x: BX0, y: BY0, r: 22, spin: 0, spinDir: 0.06 };
+
+// Bezier flight: quadratic P0->P1->P2
+var FLY = {
+  on: false, done: false, t: 0, spd: 0,
+  p0x: 0, p0y: 0,   // start
+  p1x: 0, p1y: 0,   // control point (off-line = curve)
+  p2x: 0, p2y: 0    // end (target in goal)
+};
+
+// ================================================================
+//  GOALKEEPER
+// ================================================================
+var GK = {
+  x: GCX, y: GB - 10,      // standing just in front of goal line
+  dir: 0,                  // -1 left, 0 center/up, +1 right
+  t: 0,                    // dive/jump progress 0..1
+  diving: false,
+  idle: 0,
+  saved: false,
+  heightRatio: 0           // 0=low ball, 1=high ball
+};
+// Dive params (set once per shot so draw and resolve use SAME values)
+var GK_DIVE_X  = 148;   // max horizontal travel
+var GK_JUMP_Y  = 75;    // max vertical jump for center
+var GK_CORN_Y  = 65;    // max vertical rise for corner high balls
+
+// ================================================================
+//  DRAG INPUT
+// ================================================================
+var DR = { on: false, x0: 0, y0: 0, x: 0, y: 0 };
+
+// ================================================================
+//  PARTICLES  /  FX
+// ================================================================
+var particles = [];
+var netShake = 0, joyLevel = 0, camShake = 0;
+var frame = 0;
+var resultMsg = '', resultColor = '#fff', resultT = 0;
+
+function spawnConfetti(vvx, vvy, n) {
+  for (var i = 0; i < n; i++) {
+    var a = Math.random() * 6.28, sp = 3 + Math.random() * 12;
+    particles.push({
+      x: vvx, y: vvy,
+      vx: Math.cos(a) * sp, vy: Math.sin(a) * sp - 7,
+      life: 1, dec: 0.012 + Math.random() * 0.013,
+      col: 'hsl(' + (Math.random() * 360 | 0) + ',96%,62%)',
+      w: 3 + Math.random() * 8, h: 2 + Math.random() * 4,
+      rot: Math.random() * 6.28, rv: (Math.random() - 0.5) * 0.28,
+      circ: Math.random() < 0.35
+    });
+  }
+}
+
+// ================================================================
+//  HELPERS
+// ================================================================
+function easeOut(t) { return 1 - Math.pow(1 - t, 3); }
+
+function bezXY(t) {
+  var mt = 1 - t;
+  return {
+    x: mt * mt * FLY.p0x + 2 * mt * t * FLY.p1x + t * t * FLY.p2x,
+    y: mt * mt * FLY.p0y + 2 * mt * t * FLY.p1y + t * t * FLY.p2y
+  };
+}
+
+function rrect(x, y, w, h, r, fill, stroke) {
+  CX.beginPath();
+  CX.moveTo(x + r, y); CX.lineTo(x + w - r, y);
+  CX.arcTo(x + w, y, x + w, y + r, r); CX.lineTo(x + w, y + h - r);
+  CX.arcTo(x + w, y + h, x + w - r, y + h, r); CX.lineTo(x + r, y + h);
+  CX.arcTo(x, y + h, x, y + h - r, r); CX.lineTo(x, y + r);
+  CX.arcTo(x, y, x + r, y, r); CX.closePath();
+  if (fill) { CX.fillStyle = fill; CX.fill(); }
+  if (stroke) { CX.strokeStyle = stroke; CX.stroke(); }
+}
+
+// ================================================================
+//  GOALKEEPER POSITION CALCULATOR
+//  Used by BOTH drawKeeper and resolveShot - single source of truth
+// ================================================================
+function gkCalcPos() {
+  var kx = GK.x, ky = GK.y, lean = 0, jumpUp = 0;
+  if (GK.diving) {
+    var e = easeOut(Math.min(GK.t, 1));
+    if (GK.dir === 0) {
+      // Jump straight up
+      jumpUp = e * GK_JUMP_Y;
+    } else {
+      // Lateral dive + upward rise for high balls
+      kx   += GK.dir * e * GK_DIVE_X;
+      jumpUp = e * GK.heightRatio * GK_CORN_Y;
+      lean   = GK.dir * e * 0.75;
+    }
+    ky -= jumpUp;
+  } else {
+    kx += Math.sin(GK.idle * 0.033) * 16;
+  }
+  return { kx: kx, ky: ky, lean: lean, jumpUp: jumpUp };
+}
+
+// ================================================================
+//  DRAW SKY + SUN
+// ================================================================
+function drawSky() {
+  var g = CX.createLinearGradient(px(0), py(0), px(0), py(VH * 0.5));
+  g.addColorStop(0, '#0a3060');
+  g.addColorStop(0.4, '#1464a0');
+  g.addColorStop(0.75, '#2b88c0');
+  g.addColorStop(1, '#78ccf0');
+  CX.fillStyle = g;
+  CX.fillRect(px(0), py(0), ps(VW), ps(VH));
+
+  // Sun
+  var sx = px(400), sy = py(65), sr = ps(26);
+  for (var ri = sr * 3; ri > sr; ri -= ps(2.5)) {
+    var aa = 0.035 * (1 - (ri - sr) / (sr * 2));
+    CX.fillStyle = 'rgba(255,215,60,' + aa + ')';
+    CX.beginPath(); CX.arc(sx, sy, ri, 0, 6.28); CX.fill();
+  }
+  var sunG = CX.createRadialGradient(sx - sr * 0.2, sy - sr * 0.2, 0, sx, sy, sr);
+  sunG.addColorStop(0, '#fffde0'); sunG.addColorStop(0.5, '#ffd030'); sunG.addColorStop(1, '#ff8800');
+  CX.fillStyle = sunG;
+  CX.beginPath(); CX.arc(sx, sy, sr, 0, 6.28); CX.fill();
+}
+
+// ================================================================
+//  CLOUDS
+// ================================================================
+function drawClouds() {
+  var defs = [
+    { x: 42,  y: 38, s: 1.05, sp: 0.006 },
+    { x: 210, y: 24, s: 0.82, sp: 0.004 },
+    { x: 360, y: 50, s: 0.90, sp: 0.007 }
+  ];
+  for (var i = 0; i < defs.length; i++) {
+    var c = defs[i];
+    drawCloud(c.x + Math.sin(frame * c.sp) * 7, c.y, c.s);
+  }
+}
+function drawCloud(cx, cy, sc2) {
+  var p = [
+    { dx: -26, dy: 5,  r: 18 },
+    { dx: -10, dy: 0,  r: 24 },
+    { dx: 8,   dy: 3,  r: 20 },
+    { dx: 24,  dy: 7,  r: 15 }
+  ];
+  CX.save();
+  CX.shadowColor = 'rgba(255,255,255,0.3)'; CX.shadowBlur = ps(8);
+  for (var i = 0; i < p.length; i++) {
+    var puff = p[i];
+    var cr = ps(puff.r * sc2);
+    var cxp = px(cx + puff.dx * sc2), cyp = py(cy + puff.dy * sc2);
+    var g = CX.createRadialGradient(cxp - cr * 0.25, cyp - cr * 0.25, 0, cxp, cyp, cr);
+    g.addColorStop(0, 'rgba(255,255,255,0.97)');
+    g.addColorStop(1, 'rgba(215,235,255,0.78)');
+    CX.fillStyle = g;
+    CX.beginPath(); CX.arc(cxp, cyp, cr, 0, 6.28); CX.fill();
+  }
+  CX.restore();
+}
+
+// ================================================================
+//  STADIUM STANDS + CROWD
+// ================================================================
+function drawStadium() {
+  // Stand block
+  var sg = CX.createLinearGradient(0, py(80), 0, py(305));
+  sg.addColorStop(0, '#152538'); sg.addColorStop(1, '#0c1b28');
+  CX.fillStyle = sg;
+  CX.fillRect(px(0), py(80), ps(VW), ps(225));
+
+  // Tier lines
+  var tiers = [98, 120, 143, 168, 195, 222, 250, 278];
+  for (var i = 0; i < tiers.length; i++) {
+    CX.strokeStyle = 'rgba(255,255,255,0.05)';
+    CX.lineWidth = ps(1);
+    CX.beginPath(); CX.moveTo(px(0), py(tiers[i])); CX.lineTo(px(VW), py(tiers[i])); CX.stroke();
+  }
+
+  drawCrowd();
+
+  // Roof edge
+  CX.fillStyle = 'rgba(12,28,48,0.88)';
+  CX.fillRect(px(0), py(80), ps(VW), ps(10));
+
+  // Flood lights
+  drawFloodLight(18, 78);
+  drawFloodLight(462, 78);
+
+  // Banners
+  drawBanner(20,  148, '#b52020', '#fff', 'GO TEAM');
+  drawBanner(20,  192, '#1a5aaa', '#fff', 'SWIPE!');
+  drawBanner(380, 155, '#1a8a30', '#fff', 'SCORE!');
+  drawBanner(380, 200, '#c07800', '#fff', 'GOAL!!!');
+}
+
+function drawCrowd() {
+  var cols = 28, rows = 9;
+  var cw2 = VW / cols, ch2 = 195 / rows;
+  var pal = ['#e74c3c','#e67e22','#f1c40f','#2ecc71','#3498db','#9b59b6','#ffffff','#ff6b9d','#00cec9','#fd79a8'];
+  for (var r = 0; r < rows; r++) {
+    for (var c = 0; c < cols; c++) {
+      var id = r * cols + c;
+      var col = pal[(id * 7 + r * 4) % pal.length];
+      var bx = c * cw2 + cw2 / 2;
+      var by = 88 + r * ch2 + ch2 / 2;
+      var joy = joyLevel > 0 ? Math.sin(frame * 0.17 + c * 0.52) * 1.8 : 0;
+      var wave = Math.sin(frame * 0.038 + c * 0.35) * 2.5 + joy;
+
+      // Seat shadow
+      CX.fillStyle = 'rgba(0,0,0,0.28)';
+      CX.beginPath(); CX.arc(px(bx), py(by + wave) + ps(cw2 * 0.3), ps(cw2 * 0.34), 0, 6.28); CX.fill();
+      // Head
+      CX.fillStyle = col;
+      CX.beginPath(); CX.arc(px(bx), py(by + wave), ps(cw2 * 0.36), 0, 6.28); CX.fill();
+      // Face detail
+      CX.fillStyle = 'rgba(255,220,180,0.5)';
+      CX.beginPath(); CX.arc(px(bx) + ps(cw2 * 0.08), py(by + wave) + ps(cw2 * 0.06), ps(cw2 * 0.18), 0, 6.28); CX.fill();
+      // Wave arms on joy
+      if (joyLevel > 0.2) {
+        var arm = Math.sin(frame * 0.13 + c * 0.44) * 1.0 * joyLevel;
+        CX.strokeStyle = col; CX.lineWidth = ps(1.3);
+        CX.beginPath();
+        CX.moveTo(px(bx), py(by + wave));
+        CX.lineTo(px(bx - cw2 * 0.55 * Math.cos(arm)), py(by + wave - cw2 * 0.7 * Math.sin(Math.abs(arm) + 0.4)));
+        CX.moveTo(px(bx), py(by + wave));
+        CX.lineTo(px(bx + cw2 * 0.55 * Math.cos(arm)), py(by + wave - cw2 * 0.7 * Math.sin(Math.abs(arm) + 0.4)));
+        CX.stroke();
+      }
+    }
+  }
+}
+
+function drawFloodLight(lx, ly) {
+  // Pole
+  CX.fillStyle = '#5a7080';
+  CX.fillRect(px(lx) - ps(2.5), py(ly), ps(5), ps(38));
+  // Head
+  CX.fillStyle = '#9ab0c0';
+  CX.fillRect(px(lx) - ps(14), py(ly - 7), ps(28), ps(9));
+  // Bulbs
+  for (var i = 0; i < 5; i++) {
+    var bx = px(lx) - ps(11) + ps(i * 5.5), by = py(ly - 3);
+    var lg = CX.createRadialGradient(bx, by, 0, bx, by, ps(2.8));
+    lg.addColorStop(0, 'rgba(255,255,200,1)'); lg.addColorStop(1, 'rgba(255,240,80,0)');
+    CX.fillStyle = lg;
+    CX.beginPath(); CX.arc(bx, by, ps(2.8), 0, 6.28); CX.fill();
+  }
+  // Light cone
+  CX.save();
+  var cg = CX.createLinearGradient(px(lx), py(ly), px(lx), py(ly + 220));
+  cg.addColorStop(0, 'rgba(255,255,170,0.08)'); cg.addColorStop(1, 'rgba(255,255,170,0)');
+  CX.fillStyle = cg;
+  CX.beginPath();
+  CX.moveTo(px(lx), py(ly));
+  CX.lineTo(px(lx - 90), py(ly + 220));
+  CX.lineTo(px(lx + 90), py(ly + 220));
+  CX.closePath(); CX.fill();
+  CX.restore();
+}
+
+function drawBanner(bx, by, col, txt, text) {
+  var w = ps(70), h = ps(22);
+  var wave = Math.sin(frame * 0.03 + (bx / VW) * 3) * ps(3);
+  CX.save(); CX.translate(px(bx), py(by) + wave);
+  CX.fillStyle = col;
+  CX.beginPath();
+  CX.moveTo(0, 0); CX.lineTo(w, 0); CX.lineTo(w - ps(9), h); CX.lineTo(-ps(7), h);
+  CX.closePath(); CX.fill();
+  // Shine
+  CX.fillStyle = 'rgba(255,255,255,0.18)';
+  CX.fillRect(0, 0, w * 0.45, h);
+  CX.fillStyle = txt;
+  CX.font = 'bold ' + ps(10) + 'px Segoe UI,Arial,sans-serif';
+  CX.textAlign = 'center'; CX.textBaseline = 'middle';
+  CX.fillText(text, w / 2 - ps(3), h / 2);
+  CX.restore();
+}
+
+// ================================================================
+//  GRASS
+// ================================================================
+function drawGrass() {
+  var g = CX.createLinearGradient(0, py(305), 0, py(VH));
+  g.addColorStop(0, '#186828'); g.addColorStop(0.15, '#1e8830');
+  g.addColorStop(0.45, '#22a038'); g.addColorStop(1, '#166025');
+  CX.fillStyle = g;
+  CX.fillRect(px(0), py(305), ps(VW), ps(VH - 305));
+
+  // Dark/light stripes
+  var nS = 8, sw = ps(VW / nS);
+  for (var i = 0; i < nS; i += 2) {
+    CX.fillStyle = 'rgba(0,0,0,0.08)';
+    CX.fillRect(px(0) + i * sw, py(305), sw, ps(VH - 305));
+  }
+
+  // Pitch lines
+  CX.save();
+  CX.strokeStyle = 'rgba(255,255,255,0.82)'; CX.lineWidth = ps(1.8);
+  // Penalty area
+  CX.strokeRect(px(GL - 32), py(GB + 5), ps(GW + 64), ps(190));
+  // Goal area (6-yd box)
+  CX.strokeRect(px(GL + 24), py(GB + 5), ps(GW - 48), ps(75));
+  // Penalty spot
+  CX.fillStyle = 'rgba(255,255,255,0.88)';
+  CX.beginPath(); CX.arc(px(BX0), py(BY0 + 6), ps(3.5), 0, 6.28); CX.fill();
+  // Arc
+  CX.beginPath();
+  CX.arc(px(VW / 2), py(GB + 5), ps(70), Math.PI, 0);
+  CX.stroke();
+  CX.restore();
+
+  // Grass highlight sheen
+  var sg = CX.createLinearGradient(0, py(305), 0, py(490));
+  sg.addColorStop(0, 'rgba(255,255,255,0.07)'); sg.addColorStop(1, 'rgba(255,255,255,0)');
+  CX.fillStyle = sg;
+  CX.fillRect(px(0), py(305), ps(VW), ps(185));
+}
+
+// ================================================================
+//  GOAL
+// ================================================================
+function drawGoal() {
+  var ns = netShake > 0.4 ? Math.sin(frame * 0.38) * netShake * 0.65 : 0;
+  if (netShake > 0) netShake *= 0.84;
+
+  // Depth shadow
+  CX.fillStyle = 'rgba(0,0,0,0.25)';
+  CX.fillRect(px(GL + 7), py(GT + 7), ps(GW), ps(GH));
+
+  // Net fill
+  var ng = CX.createLinearGradient(0, py(GT), 0, py(GB));
+  ng.addColorStop(0, 'rgba(170,205,255,0.44)');
+  ng.addColorStop(1, 'rgba(110,160,230,0.14)');
+  CX.fillStyle = ng;
+  CX.fillRect(px(GL + 6), py(GT + 6), ps(GW - 12), ps(GH - 6));
+
+  // Net lines
+  CX.save(); CX.lineWidth = ps(0.7);
+  var NR = 14, NC = 18;
+  for (var r = 0; r <= NR; r++) {
+    var ny = py(GT + 6 + r * (GH - 6) / NR) + ns * (r / NR) * ps(1.4);
+    CX.strokeStyle = r % 3 === 0 ? 'rgba(255,255,255,0.58)' : 'rgba(255,255,255,0.26)';
+    CX.beginPath(); CX.moveTo(px(GL + 6), ny); CX.lineTo(px(GR - 6), ny); CX.stroke();
+  }
+  for (var c = 0; c <= NC; c++) {
+    var nx = px(GL + 6 + c * (GW - 12) / NC);
+    CX.strokeStyle = c % 3 === 0 ? 'rgba(255,255,255,0.58)' : 'rgba(255,255,255,0.26)';
+    CX.beginPath(); CX.moveTo(nx, py(GT + 6)); CX.lineTo(nx + ns, py(GB)); CX.stroke();
+  }
+  CX.restore();
+
+  // Posts  (3D look: face + side edge)
+  var PW = ps(9);
+  CX.save(); CX.shadowColor = 'rgba(0,0,0,0.32)'; CX.shadowBlur = ps(7);
+  CX.fillStyle = '#eef2f6';
+  // Left post face
+  CX.fillRect(px(GL - 4), py(GT - 5), PW, ps(GH + 9));
+  // Right post face
+  CX.fillRect(px(GR - 5), py(GT - 5), PW, ps(GH + 9));
+  // Crossbar face
+  CX.fillRect(px(GL - 4), py(GT - 5), ps(GW + 9), PW);
+  CX.shadowBlur = 0;
+  // Highlight edge
+  CX.fillStyle = 'rgba(255,255,255,0.4)';
+  CX.fillRect(px(GL - 4), py(GT - 5), ps(3), ps(GH + 9));
+  CX.fillRect(px(GR - 5), py(GT - 5), ps(3), ps(GH + 9));
+  CX.fillRect(px(GL - 4), py(GT - 5), ps(GW + 9), ps(3));
+  // Dark right edge (depth)
+  CX.fillStyle = 'rgba(0,0,0,0.22)';
+  CX.fillRect(px(GL + 5), py(GT - 5), ps(3), ps(GH + 9));
+  CX.fillRect(px(GR + 4), py(GT - 5), ps(3), ps(GH + 9));
+  CX.restore();
+}
+
+// ================================================================
+//  GOALKEEPER DRAW
+// ================================================================
+function drawKeeper() {
+  var pos = gkCalcPos();
+  var kx = pos.kx, ky = pos.ky, lean = pos.lean;
+  if (!GK.diving) GK.idle++;
+
+  var cx = px(kx), cy = py(ky);
+  CX.save();
+  CX.translate(cx, cy);
+  CX.rotate(lean);
+
+  // Ground shadow - stays on ground regardless of jump
+  CX.fillStyle = 'rgba(0,0,0,0.18)';
+  var shadowSc = GK.diving ? Math.max(0.4, 1 - pos.jumpUp / 80) : 1;
+  CX.beginPath();
+  CX.ellipse(0, py(GK.y) - cy + ps(58), ps(28 * shadowSc), ps(7 * shadowSc), 0, 0, 6.28);
+  CX.fill();
+
+  var diveE = GK.diving ? Math.min(GK.t * 2.2, 1) : 0;
+  var idleB  = Math.sin(GK.idle * 0.04) * 0.28;
+  var isJump = GK.diving && GK.dir === 0;
+  var isLeft = GK.diving && GK.dir < 0;
+  var isRight= GK.diving && GK.dir > 0;
+
+  // ── LEGS ──────────────────────────────────────────────────
+  if (isJump) {
+    // Jump: legs straight down, slightly together
+    CX.fillStyle = '#18306a';
+    CX.fillRect(-ps(13), ps(28), ps(11), ps(26));
+    CX.fillRect(ps(2),   ps(28), ps(11), ps(26));
+    CX.fillStyle = '#dde0e8';
+    CX.fillRect(-ps(13), ps(54), ps(11), ps(14));
+    CX.fillRect(ps(2),   ps(54), ps(11), ps(14));
+    CX.fillStyle = '#111';
+    CX.beginPath(); CX.ellipse(-ps(7), ps(68), ps(10), ps(6), 0, 0, 6.28); CX.fill();
+    CX.beginPath(); CX.ellipse(ps(8),  ps(68), ps(10), ps(6), 0, 0, 6.28); CX.fill();
+  } else {
+    var legSpread = (isLeft || isRight) ? GK.dir * diveE * 0.55 : Math.sin(GK.idle * 0.06) * 0.1;
+    var legDefs = [{ lx: -ps(13), s: -1 }, { lx: ps(2), s: 1 }];
+    for (var i = 0; i < 2; i++) {
+      var ld = legDefs[i];
+      CX.save(); CX.rotate(ld.s * (-legSpread));
+      CX.fillStyle = '#18306a';
+      CX.fillRect(ld.lx, ps(28), ps(11), ps(26));
+      CX.fillStyle = '#dde0e8';
+      CX.fillRect(ld.lx, ps(54), ps(11), ps(14));
+      CX.fillStyle = '#111';
+      CX.beginPath(); CX.ellipse(ld.lx + ps(5.5), ps(68), ps(10), ps(6), 0, 0, 6.28); CX.fill();
+      CX.restore();
+    }
+  }
+
+  // ── BODY (JERSEY) ─────────────────────────────────────────
+  var jg = CX.createLinearGradient(-ps(22), -ps(5), ps(22), ps(34));
+  jg.addColorStop(0, '#f5c420'); jg.addColorStop(0.5, '#e4a000'); jg.addColorStop(1, '#aa7200');
+  CX.fillStyle = jg;
+  CX.beginPath();
+  CX.moveTo(-ps(22), -ps(6)); CX.lineTo(ps(22), -ps(6));
+  CX.lineTo(ps(20), ps(34)); CX.lineTo(-ps(20), ps(34));
+  CX.closePath(); CX.fill();
+  // Shirt stripe
+  CX.fillStyle = 'rgba(255,255,255,0.2)';
+  CX.fillRect(-ps(7), -ps(6), ps(14), ps(40));
+  // Number
+  CX.fillStyle = 'rgba(255,255,255,0.6)';
+  CX.font = 'bold ' + ps(14) + 'px Segoe UI,sans-serif';
+  CX.textAlign = 'center'; CX.textBaseline = 'middle';
+  CX.fillText('1', 0, ps(14));
+
+  // ── ARMS ──────────────────────────────────────────────────
+  var lAng, rAng;
+  if (isJump) {
+    // Both arms shoot UP
+    lAng = -1.6 - diveE * 0.6;
+    rAng =  1.6 + diveE * 0.6;
+  } else if (isLeft) {
+    lAng = -1.25 - diveE * 1.15;   // left arm reaches far left
+    rAng =  0.4  + diveE * 0.3;    // right arm out for balance
+  } else if (isRight) {
+    lAng = -0.4  - diveE * 0.3;
+    rAng =  1.25 + diveE * 1.15;   // right arm reaches far right
+  } else {
+    lAng = -0.4 + idleB;
+    rAng =  0.4 + idleB;
+  }
+
+  var armDefs = [
+    { ax: -ps(22), ang: lAng, flip: 0 },
+    { ax:  ps(22), ang: rAng, flip: 1 }
+  ];
+  for (var i = 0; i < 2; i++) {
+    var ad = armDefs[i];
+    CX.save();
+    CX.translate(ad.ax, ps(2)); CX.rotate(ad.ang);
+    CX.fillStyle = '#f5c420';
+    CX.fillRect(ad.flip === 0 ? -ps(10) : 0, 0, ps(10), ps(24));
+    var gxA = ad.flip === 0 ? -ps(4) : ps(6);
+    var glG = CX.createRadialGradient(gxA, ps(31), 0, gxA, ps(31), ps(13));
+    glG.addColorStop(0, '#ff4500'); glG.addColorStop(1, '#bb1800');
+    CX.fillStyle = glG;
+    CX.beginPath(); CX.arc(gxA, ps(31), ps(13), 0, 6.28); CX.fill();
+    // Glove grip lines
+    CX.strokeStyle = 'rgba(0,0,0,0.3)'; CX.lineWidth = ps(1.2);
+    for (var g2 = 0; g2 < 3; g2++) {
+      var gripX = ad.flip === 0 ? -ps(9) + ps(g2 * 5) : ps(1) + ps(g2 * 5);
+      CX.beginPath(); CX.moveTo(gripX, ps(24)); CX.lineTo(gripX, ps(36)); CX.stroke();
+    }
+    CX.restore();
+  }
+
+  // ── HEAD ──────────────────────────────────────────────────
+  var hg = CX.createRadialGradient(-ps(4), -ps(33), 0, 0, -ps(27), ps(19));
+  hg.addColorStop(0, '#ffd8a0'); hg.addColorStop(1, '#dd8f60');
+  CX.fillStyle = hg;
+  CX.save(); CX.shadowColor = 'rgba(0,0,0,0.22)'; CX.shadowBlur = ps(5);
+  CX.beginPath(); CX.arc(0, -ps(27), ps(19), 0, 6.28); CX.fill();
+  CX.shadowBlur = 0; CX.restore();
+  // Hair
+  CX.fillStyle = '#3a2800';
+  CX.beginPath(); CX.arc(0, -ps(32), ps(17), Math.PI, 0); CX.fill();
+  CX.fillRect(-ps(17), -ps(32), ps(34), ps(5));
+  // Eye whites
+  CX.fillStyle = '#fff';
+  CX.beginPath(); CX.ellipse(-ps(7), -ps(27), ps(4.5), ps(3.5), 0, 0, 6.28); CX.fill();
+  CX.beginPath(); CX.ellipse( ps(7), -ps(27), ps(4.5), ps(3.5), 0, 0, 6.28); CX.fill();
+  // Pupils (look toward dive)
+  var eShift = GK.diving ? GK.dir * ps(1.5) : 0;
+  CX.fillStyle = '#1a1a1a';
+  CX.beginPath(); CX.arc(-ps(7) + eShift, -ps(27), ps(2.8), 0, 6.28); CX.fill();
+  CX.beginPath(); CX.arc( ps(7) + eShift, -ps(27), ps(2.8), 0, 6.28); CX.fill();
+  // Eyebrows
+  CX.strokeStyle = '#3a2800'; CX.lineWidth = ps(2.2);
+  var browY = isJump ? -ps(6) : -ps(3);
+  CX.beginPath(); CX.moveTo(-ps(11), -ps(33) + browY); CX.lineTo(-ps(3),  -ps(34) + browY); CX.stroke();
+  CX.beginPath(); CX.moveTo(  ps(3), -ps(34) + browY); CX.lineTo( ps(11), -ps(33) + browY); CX.stroke();
+  // Mouth
+  CX.strokeStyle = '#883300'; CX.lineWidth = ps(1.5);
+  CX.beginPath();
+  if (isJump) {
+    CX.arc(0, -ps(20), ps(4.5), 0, 6.28);  // O-mouth surprised
+  } else if (GK.diving) {
+    CX.arc(0, -ps(21), ps(5), 0.2, Math.PI - 0.2);
+  } else {
+    CX.arc(0, -ps(23), ps(5), 0.2, Math.PI - 0.2, true);
+  }
+  CX.stroke();
+
+  CX.restore();
+}
+
+// ================================================================
+//  BALL DRAW
+// ================================================================
+function drawBall(bx, by, r, spin, depth) {
+  var cx = px(bx), cy = py(by), cr = ps(r);
+
+  // Shadow on grass (shrinks + moves toward ball as ball nears ground)
+  CX.save();
+  CX.globalAlpha = 0.25 * depth * depth;
+  CX.fillStyle = '#000';
+  CX.beginPath();
+  CX.ellipse(cx, py(by + r * 0.85), cr * 0.85 * depth, cr * 0.22 * depth, 0, 0, 6.28);
+  CX.fill();
+  CX.restore();
+
+  CX.save();
+  CX.translate(cx, cy);
+  CX.rotate(spin);
+
+  // Ball gradient
+  var bg = CX.createRadialGradient(-cr * 0.33, -cr * 0.33, cr * 0.04, 0, 0, cr);
+  bg.addColorStop(0, '#ffffff');
+  bg.addColorStop(0.42, '#f2f2f2');
+  bg.addColorStop(1, '#686868');
+  CX.fillStyle = bg;
+  CX.shadowColor = 'rgba(0,0,0,0.45)'; CX.shadowBlur = ps(9);
+  CX.beginPath(); CX.arc(0, 0, cr, 0, 6.28); CX.fill();
+  CX.shadowBlur = 0;
+
+  // Pentagon patches
+  var patches = [
+    [0, 0],
+    [ cr * 0.52, -cr * 0.34], [-cr * 0.52, -cr * 0.34],
+    [ cr * 0.52,  cr * 0.40], [-cr * 0.52,  cr * 0.40],
+    [0, cr * 0.65]
+  ];
+  CX.fillStyle = '#1a1a1a';
+  for (var i = 0; i < patches.length; i++) {
+    var ppx = patches[i][0], ppy = patches[i][1], pr = cr * 0.28;
+    CX.save(); CX.translate(ppx, ppy);
+    CX.beginPath(); CX.moveTo(pr, 0);
+    for (var j = 1; j <= 5; j++) CX.lineTo(pr * Math.cos(j * 6.28 / 5), pr * Math.sin(j * 6.28 / 5));
+    CX.closePath(); CX.fill();
+    CX.restore();
+  }
+
+  // Specular highlight
+  CX.fillStyle = 'rgba(255,255,255,0.52)';
+  CX.beginPath();
+  CX.ellipse(-cr * 0.28, -cr * 0.3, cr * 0.2, cr * 0.13, -0.45, 0, 6.28);
+  CX.fill();
+
+  CX.restore();
+}
+
+// ================================================================
+//  AIM PREVIEW
+// ================================================================
+function drawAim() {
+  if (st !== ST.AIM || !DR.on) return;
+  var dx = DR.x - DR.x0, dy = DR.y - DR.y0;
+  var len = Math.sqrt(dx * dx + dy * dy);
+  if (len < 8) return;
+
+  var pow = Math.min(len / 155, 1);
+  // Compute the EXACT same bezier as doShoot will use
+  var bezier = computeShot(dx, dy, pow);
+  var p1x = bezier.p1x, p1y = bezier.p1y;
+  var p2x = bezier.p2x, p2y = bezier.p2y;
+
+  // Animated dashed curve
+  CX.save();
+  CX.setLineDash([ps(9), ps(7)]);
+  CX.lineDashOffset = -frame * 0.9;
+  CX.strokeStyle = 'rgba(255,238,50,' + (0.48 + pow * 0.44) + ')';
+  CX.lineWidth = ps(2.8);
+  CX.shadowColor = 'rgba(255,230,50,0.55)'; CX.shadowBlur = ps(10);
+  CX.beginPath();
+  CX.moveTo(px(BX0), py(BY0));
+  CX.quadraticCurveTo(px(p1x), py(p1y), px(p2x), py(p2y));
+  CX.stroke();
+  CX.setLineDash([]); CX.shadowBlur = 0;
+
+  // Ghost ball at arc peak (~t=0.4 on bezier)
+  var pt4 = computeBezierPt(BX0, BY0, p1x, p1y, p2x, p2y, 0.4);
+  CX.globalAlpha = 0.22 * pow;
+  CX.fillStyle = '#fff';
+  CX.beginPath(); CX.arc(px(pt4.x), py(pt4.y), ps(ball.r * 0.65), 0, 6.28); CX.fill();
+  CX.globalAlpha = 1;
+
+  // Target ring
+  var ta = 0.38 + pow * 0.52;
+  var rr2 = ps(13 + pow * 10);
+  CX.fillStyle = 'rgba(255,65,65,' + (ta * 0.32) + ')';
+  CX.strokeStyle = 'rgba(255,65,65,' + ta + ')';
+  CX.lineWidth = ps(2.2);
+  CX.beginPath(); CX.arc(px(p2x), py(p2y), rr2, 0, 6.28); CX.fill(); CX.stroke();
+  CX.beginPath();
+  CX.moveTo(px(p2x) - ps(10), py(p2y)); CX.lineTo(px(p2x) + ps(10), py(p2y));
+  CX.moveTo(px(p2x), py(p2y) - ps(10)); CX.lineTo(px(p2x), py(p2y) + ps(10));
+  CX.stroke();
+
+  // Power bar
+  var bw = ps(145), bh = ps(12);
+  var bx2 = px(VW / 2 - 72.5), by2 = py(VH - 86);
+  rrect(bx2, by2, bw, bh, ps(6), 'rgba(0,0,0,0.52)');
+  var pc = pow < 0.38 ? '#4ade80' : pow < 0.7 ? '#fbbf24' : '#f87171';
+  rrect(bx2, by2, bw * pow, bh, ps(6), pc);
+  CX.strokeStyle = 'rgba(255,255,255,0.3)'; CX.lineWidth = ps(1);
+  rrect(bx2, by2, bw, bh, ps(6), null, 'rgba(255,255,255,0.3)');
+  CX.fillStyle = 'rgba(255,255,255,0.85)';
+  CX.font = 'bold ' + ps(10) + 'px Segoe UI,Arial,sans-serif';
+  CX.textAlign = 'center'; CX.textBaseline = 'alphabetic';
+  CX.fillText('POWER', px(VW / 2), by2 - ps(5));
+  CX.restore();
+}
+
+// ================================================================
+//  HUD
+// ================================================================
+function drawHUD() {
+  rrect(px(8), py(8), ps(VW - 16), ps(54), ps(14), 'rgba(6,16,36,0.78)');
+  CX.strokeStyle = 'rgba(255,255,255,0.1)'; CX.lineWidth = ps(1);
+  rrect(px(8), py(8), ps(VW - 16), ps(54), ps(14), null, 'rgba(255,255,255,0.1)');
+
+  var stats = [
+    { label: 'SHOTS', val: nShots + '/' + TOTAL, x: VW * 0.18, col: '#93c5fd' },
+    { label: 'GOALS', val: '' + nGoals,           x: VW * 0.50, col: '#6ee7b7' },
+    { label: 'SAVED', val: '' + nSaves,           x: VW * 0.82, col: '#fca5a5' }
+  ];
+  for (var i = 0; i < 3; i++) {
+    var s = stats[i];
+    CX.fillStyle = s.col;
+    CX.font = 'bold ' + ps(9) + 'px Segoe UI,Arial,sans-serif';
+    CX.textAlign = 'center'; CX.textBaseline = 'alphabetic';
+    CX.fillText(s.label, px(s.x), py(24));
+    CX.fillStyle = '#fff';
+    CX.font = '900 ' + ps(22) + 'px Segoe UI,Arial,sans-serif';
+    CX.fillText(s.val, px(s.x), py(52));
+  }
+
+  // Sound button
+  var sbx = px(VW - 52), sby = py(10), sbw = ps(42), sbh = ps(34);
+  rrect(sbx, sby, sbw, sbh, ps(9), muted ? 'rgba(55,55,55,0.88)' : 'rgba(30,90,220,0.88)');
+  CX.fillStyle = '#fff';
+  CX.font = ps(17) + 'px sans-serif';
+  CX.textAlign = 'center'; CX.textBaseline = 'middle';
+  CX.fillText(muted ? '\uD83D\uDD07' : '\uD83D\uDD0A', sbx + sbw / 2, sby + sbh / 2);
+  CX.textBaseline = 'alphabetic';
+
+  if (st === ST.IDLE) {
+    var iw = ps(305), ih = ps(36), ix = px(VW / 2) - iw / 2, iy = py(VH - 80);
+    rrect(ix, iy, iw, ih, ps(18), 'rgba(0,0,0,0.48)');
+    CX.fillStyle = 'rgba(255,255,255,0.85)';
+    CX.font = ps(13.5) + 'px Segoe UI,Arial,sans-serif';
+    CX.textAlign = 'center'; CX.textBaseline = 'middle';
+    CX.fillText('\u2B06  Touch the ball & swipe up to shoot  \u2B06', px(VW / 2), iy + ih / 2);
+    CX.textBaseline = 'alphabetic';
+  }
+}
+
+// ================================================================
+//  RESULT POPUP
+// ================================================================
+function drawResult() {
+  if (st !== ST.RESULT) return;
+  var prog = 1 - resultT / 110;
+  var alpha = Math.min(resultT / 14, 1) * Math.min((110 - resultT) / 14, 1);
+  var sc2 = 0.5 + prog * 0.7;
+  CX.save();
+  CX.globalAlpha = alpha;
+  CX.translate(px(VW / 2), py(VH * 0.50));
+  CX.scale(sc2, sc2);
+  CX.fillStyle = resultColor;
+  CX.shadowColor = resultColor; CX.shadowBlur = ps(35);
+  CX.font = '900 ' + ps(82) + 'px Segoe UI Black,Segoe UI,Arial,sans-serif';
+  CX.textAlign = 'center'; CX.textBaseline = 'middle';
+  CX.fillText(resultMsg, 0, 0);
+  CX.restore();
+}
+
+// ================================================================
+//  PARTICLES
+// ================================================================
+function drawParticles() {
+  for (var i = 0; i < particles.length; i++) {
+    var p = particles[i];
+    CX.save();
+    CX.globalAlpha = Math.max(p.life, 0);
+    CX.fillStyle = p.col;
+    CX.translate(px(p.x), py(p.y));
+    CX.rotate(p.rot);
+    if (p.circ) {
+      CX.beginPath(); CX.arc(0, 0, ps(p.w / 2), 0, 6.28); CX.fill();
+    } else {
+      CX.fillRect(-ps(p.w / 2), -ps(p.h / 2), ps(p.w), ps(p.h));
+    }
+    CX.restore();
+  }
+}
+
+// ================================================================
+//  SPLASH / GAME-OVER SCREENS
+// ================================================================
+function drawSplash() {
+  CX.fillStyle = 'rgba(0,8,22,0.84)';
+  CX.fillRect(px(0), py(0), ps(VW), ps(VH));
+
+  CX.save();
+  CX.shadowColor = 'rgba(0,60,180,0.32)'; CX.shadowBlur = ps(32);
+  rrect(px(26), py(158), ps(428), ps(500), ps(22), 'rgba(10,22,52,0.97)');
+  CX.shadowBlur = 0;
+  CX.strokeStyle = 'rgba(255,255,255,0.1)'; CX.lineWidth = ps(1.5);
+  rrect(px(26), py(158), ps(428), ps(500), ps(22), null, 'rgba(255,255,255,0.1)');
+  CX.restore();
+
+  CX.textAlign = 'center';
+  CX.fillStyle = '#facc15'; CX.shadowColor = '#facc15'; CX.shadowBlur = ps(22);
+  CX.font = '900 ' + ps(44) + 'px Segoe UI Black,Segoe UI,Arial,sans-serif';
+  CX.textBaseline = 'middle';
+  CX.fillText('PENALTY SWIPE', px(VW / 2), py(232));
+  CX.fillStyle = '#fff'; CX.shadowBlur = 0;
+  CX.font = 'bold ' + ps(28) + 'px Segoe UI,Arial,sans-serif';
+  CX.fillText('\u26BD  SOCCER  \u26BD', px(VW / 2), py(284));
+
+  // Animated ball
+  CX.save();
+  var pulse = 1 + Math.sin(frame * 0.055) * 0.06;
+  CX.translate(px(VW / 2), py(372)); CX.scale(pulse, pulse);
+  var pr = ps(36);
+  var bg2 = CX.createRadialGradient(-pr * 0.3, -pr * 0.3, pr * 0.04, 0, 0, pr);
+  bg2.addColorStop(0, '#fff'); bg2.addColorStop(1, '#888');
+  CX.fillStyle = bg2;
+  CX.shadowColor = 'rgba(0,0,0,0.5)'; CX.shadowBlur = ps(14);
+  CX.beginPath(); CX.arc(0, 0, pr, 0, 6.28); CX.fill(); CX.shadowBlur = 0;
+  CX.fillStyle = '#111';
+  CX.save(); CX.rotate(frame * 0.033);
+  var sp2 = ps(10);
+  CX.beginPath(); CX.moveTo(sp2, 0);
+  for (var i = 1; i <= 5; i++) CX.lineTo(sp2 * Math.cos(i * 6.28 / 5), sp2 * Math.sin(i * 6.28 / 5));
+  CX.closePath(); CX.fill();
+  CX.restore(); CX.restore();
+
+  CX.textAlign = 'center'; CX.textBaseline = 'middle';
+  CX.fillStyle = 'rgba(255,255,255,0.7)';
+  CX.font = ps(15) + 'px Segoe UI,Arial,sans-serif';
+  CX.fillText('Swipe the ball upward to shoot', px(VW / 2), py(445));
+  CX.fillText('Swipe left/right to curve & aim corners', px(VW / 2), py(473));
+  CX.fillStyle = 'rgba(255,255,255,0.48)';
+  CX.fillText(TOTAL + ' shots  \u2014  score as many goals as you can!', px(VW / 2), py(505));
+
+  var tap = 0.6 + Math.sin(frame * 0.07) * 0.4;
+  CX.fillStyle = 'rgba(250,204,21,' + tap + ')';
+  CX.font = 'bold ' + ps(25) + 'px Segoe UI,Arial,sans-serif';
+  CX.fillText('\u25B6  TAP TO START', px(VW / 2), py(565));
+  CX.textBaseline = 'alphabetic';
+}
+
+function drawGameOver() {
+  CX.fillStyle = 'rgba(0,8,22,0.90)';
+  CX.fillRect(px(0), py(0), ps(VW), ps(VH));
+
+  CX.save();
+  CX.shadowColor = 'rgba(0,60,180,0.28)'; CX.shadowBlur = ps(30);
+  rrect(px(24), py(125), ps(432), ps(555), ps(22), 'rgba(10,22,52,0.97)');
+  CX.shadowBlur = 0;
+  CX.strokeStyle = 'rgba(255,255,255,0.1)'; CX.lineWidth = ps(1.5);
+  rrect(px(24), py(125), ps(432), ps(555), ps(22), null, 'rgba(255,255,255,0.1)');
+  CX.restore();
+
+  var ratio = nGoals / TOTAL;
+  var rat, rcol;
+  if (ratio >= 0.8)      { rat = '\uD83C\uDFC6 LEGEND!';    rcol = '#facc15'; }
+  else if (ratio >= 0.6) { rat = '\u2B50 GREAT!';           rcol = '#60a5fa'; }
+  else if (ratio >= 0.4) { rat = '\uD83D\uDC4D GOOD!';      rcol = '#4ade80'; }
+  else                   { rat = '\uD83D\uDCAA TRY AGAIN!'; rcol = '#94a3b8'; }
+
+  CX.textAlign = 'center'; CX.textBaseline = 'middle';
+  CX.fillStyle = rcol; CX.shadowColor = rcol; CX.shadowBlur = ps(20);
+  CX.font = '900 ' + ps(37) + 'px Segoe UI Black,Segoe UI,Arial,sans-serif';
+  CX.fillText(rat, px(VW / 2), py(196));
+  CX.shadowBlur = 0;
+  CX.fillStyle = '#fff';
+  CX.font = 'bold ' + ps(22) + 'px Segoe UI,Arial,sans-serif';
+  CX.fillText('FINAL SCORE', px(VW / 2), py(250));
+
+  // Big score
+  var sg2 = CX.createLinearGradient(0, py(284), 0, py(354));
+  sg2.addColorStop(0, '#6ee7b7'); sg2.addColorStop(1, '#3b82f6');
+  CX.fillStyle = sg2;
+  CX.font = '900 ' + ps(75) + 'px Segoe UI Black,Segoe UI,Arial,sans-serif';
+  CX.fillText(nGoals + '/' + TOTAL, px(VW / 2), py(322));
+  CX.fillStyle = 'rgba(255,255,255,0.48)';
+  CX.font = ps(14) + 'px Segoe UI,Arial,sans-serif';
+  CX.fillText('GOALS SCORED', px(VW / 2), py(370));
+
+  // Stat rows
+  var rows = [
+    ['\u26BD  Goals',  nGoals, '#6ee7b7'],
+    ['\uD83E\uDDE4  Saved',  nSaves, '#f87171'],
+    ['\u274C  Missed', nMiss,  '#fde68a']
+  ];
+  for (var i = 0; i < 3; i++) {
+    var label = rows[i][0], val = rows[i][1], col = rows[i][2];
+    var ry = py(408 + i * 72), rxL = px(44), rW = ps(392);
+    rrect(rxL, ry, rW, ps(54), ps(10), 'rgba(255,255,255,0.06)');
+    if (val > 0) rrect(rxL, ry, rW * (val / TOTAL), ps(54), ps(10), col + '40');
+    CX.fillStyle = col;
+    CX.font = 'bold ' + ps(17) + 'px Segoe UI,Arial,sans-serif';
+    CX.textAlign = 'left'; CX.textBaseline = 'middle';
+    CX.fillText(label, rxL + ps(14), ry + ps(27));
+    CX.fillStyle = '#fff';
+    CX.font = '900 ' + ps(24) + 'px Segoe UI Black,Arial,sans-serif';
+    CX.textAlign = 'right';
+    CX.fillText(val, rxL + rW - ps(14), ry + ps(29));
+  }
+
+  // Play Again button
+  var btnX = px(108), btnY = py(637), btnW = ps(264), btnH = ps(64);
+  var bg3 = CX.createLinearGradient(0, btnY, 0, btnY + btnH);
+  bg3.addColorStop(0, '#22c55e'); bg3.addColorStop(1, '#15803d');
+  CX.save();
+  CX.shadowColor = 'rgba(34,197,94,0.5)'; CX.shadowBlur = ps(18);
+  rrect(btnX, btnY, btnW, btnH, ps(14), null);
+  CX.fillStyle = bg3; CX.fill();
+  CX.shadowBlur = 0;
+  CX.strokeStyle = 'rgba(255,255,255,0.28)'; CX.lineWidth = ps(1.5);
+  rrect(btnX, btnY, btnW, btnH, ps(14), null, 'rgba(255,255,255,0.28)');
+  CX.fillStyle = '#fff';
+  CX.font = 'bold ' + ps(23) + 'px Segoe UI,Arial,sans-serif';
+  CX.textAlign = 'center'; CX.textBaseline = 'middle';
+  CX.fillText('\u25B6  PLAY AGAIN', px(VW / 2), btnY + btnH / 2);
+  CX.restore();
+  CX.textBaseline = 'alphabetic';
+}
+
+// ================================================================
+//  SHOT COMPUTATION  (shared by aim preview + actual shoot)
+// ================================================================
+function computeBezierPt(ax, ay, bx, by, cx, cy, t) {
+  var mt = 1 - t;
+  return { x: mt*mt*ax + 2*mt*t*bx + t*t*cx,
+           y: mt*mt*ay + 2*mt*t*by + t*t*cy };
+}
+
+function computeShot(dx, dy, pow) {
+  // Target in goal
+  var tx = clamp(BX0 + dx * 1.82, GL - 22, GR + 22);
+  var ty = clamp(BY0 + dy * 1.82, GT - 26, GB + 16);
+
+  // ── CURVE CONTROL POINT ────────────────────────────────────
+  // The control point MUST be horizontally offset from the P0-P2 line
+  // to create a visible swerve/banana effect.
+  //
+  // Method:
+  //  1. Find the unit perpendicular to the P0->P2 direction
+  //  2. Swerve amount = horizontal drag component * factor
+  //  3. Always enforce a minimum swerve so the ball NEVER looks straight
+  //  4. Place control point ~35% along trajectory + perpendicular offset
+
+  var shotDX = tx - BX0, shotDY = ty - BY0;
+  var shotLen = Math.sqrt(shotDX * shotDX + shotDY * shotDY) || 1;
+
+  // Perpendicular (rotated 90 deg CCW)
+  var perpX = -shotDY / shotLen;   // for upward shot: points RIGHT (+x)
+  var perpY =  shotDX / shotLen;   // for upward shot: near 0
+
+  // Swerve: horizontal drag drives it; always add minimum 32 units
+  var rawSwerve = dx * 0.95;
+  var minSwerve = 32;
+  if (rawSwerve >= 0 && rawSwerve < minSwerve)  rawSwerve = minSwerve;
+  if (rawSwerve < 0  && rawSwerve > -minSwerve) rawSwerve = -minSwerve;
+
+  // Control point: 35% along the straight trajectory + perpendicular push
+  var t_ctrl = 0.35;
+  var cpx = BX0 + shotDX * t_ctrl + perpX * rawSwerve;
+  var cpy = BY0 + shotDY * t_ctrl + perpY * rawSwerve;
+
+  return { p1x: cpx, p1y: cpy, p2x: tx, p2y: ty };
+}
+
+// ================================================================
+//  KEEPER DECIDE
+// ================================================================
+function keeperDecide(tx, ty) {
+  // Horizontal zone
+  var zone = 0;
+  if (tx < GCX - GW * 0.22) zone = -1;
+  else if (tx > GCX + GW * 0.22) zone = 1;
+
+  // Height ratio: 0 = low (near GB), 1 = high (near GT)
+  GK.heightRatio = clamp(1 - (ty - GT) / GH, 0, 1);
+
+  // 38% wrong guess
+  if (Math.random() < 0.38) {
+    var opts = [];
+    var all = [-1, 0, 1];
+    for (var i = 0; i < 3; i++) if (all[i] !== zone) opts.push(all[i]);
+    GK.dir = opts[Math.floor(Math.random() * opts.length)];
+  } else {
+    GK.dir = zone;
+  }
+  GK.diving = true; GK.t = 0; GK.saved = false;
+}
+
+// ================================================================
+//  SHOOT
+// ================================================================
+function doShoot() {
+  if (st !== ST.AIM) return;
+  var dx = DR.x - DR.x0, dy = DR.y - DR.y0;
+  var len = Math.sqrt(dx * dx + dy * dy);
+  if (len < 10) { cancelDrag(); return; }
+
+  var pow = Math.min(len / 155, 1);
+  var spd = 0.017 + pow * 0.022;   // slower = more visible curve arc
+
+  var shot = computeShot(dx, dy, pow);
+
+  FLY.p0x = BX0;       FLY.p0y = BY0;
+  FLY.p1x = shot.p1x;  FLY.p1y = shot.p1y;
+  FLY.p2x = shot.p2x;  FLY.p2y = shot.p2y;
+  FLY.t = 0; FLY.spd = spd; FLY.on = true; FLY.done = false;
+
+  ball.spinDir = dx > 0 ? 0.08 : -0.08;
+
+  keeperDecide(shot.p2x, shot.p2y);
+  st = ST.FLY;
+  sndKick();
+  cancelDrag();
+}
+
+function cancelDrag() { DR.on = false; }
+
+// ================================================================
+//  RESOLVE SHOT  (called once when ball reaches target)
+// ================================================================
+function resolveShot() {
+  nShots++;
+
+  // Ball final position = exactly the bezier endpoint
+  var bx = FLY.p2x, by = FLY.p2y;
+
+  // In-goal check
+  var inGoal = bx > GL + 4 && bx < GR - 4 && by < GB + 6 && by > GT - 24;
+
+  // ── KEEPER FINAL POSITION (same formula as gkCalcPos) ──────
+  var e = easeOut(Math.min(GK.t, 1));
+  var kx = GK.x, kFinalY = GK.y;
+  if (GK.dir === 0) {
+    kFinalY -= e * GK_JUMP_Y;
+  } else {
+    kx      += GK.dir * e * GK_DIVE_X;
+    kFinalY -= e * GK.heightRatio * GK_CORN_Y;
+  }
+
+  // ── HIT BOX (generous, matches the drawn keeper body+arms) ──
+  // Horizontal: keeper body is ~44 wide + arms extend ~24 more on dive side
+  var halfW = 48;
+  if (GK.diving) halfW += 28 * e;   // extended arm reach on dive side
+
+  // Vertical: keeper head-to-boot ~96 units tall; center at kFinalY
+  var topY    = kFinalY - 96;   // top of head
+  var bottomY = kFinalY + 62;   // bottom of boots
+
+  var hitGK = Math.abs(bx - kx) < halfW && by > topY && by < bottomY;
+
+  if (hitGK && inGoal) {
+    resultMsg = 'SAVED!'; resultColor = '#f87171';
+    nSaves++; GK.saved = true;
+    sndSave();
+  } else if (inGoal) {
+    resultMsg = 'GOAL!'; resultColor = '#4ade80';
+    nGoals++;
+    netShake = 18; joyLevel = 1; camShake = 7;
+    spawnConfetti(bx, by, 80);
+    sndGoal();
+  } else {
+    resultMsg = 'MISS!'; resultColor = '#fbbf24';
+    nMiss++;
+    sndMiss();
+  }
+
+  resultT = 110; st = ST.RESULT;
+}
+
+// ================================================================
+//  RESET ROUND
+// ================================================================
+function resetRound() {
+  ball.x = BX0; ball.y = BY0; ball.spin = 0; ball.spinDir = 0.06;
+  FLY.on = false; FLY.done = false; FLY.t = 0;
+  GK.x = GCX; GK.y = GB - 10;
+  GK.diving = false; GK.t = 0; GK.dir = 0; GK.saved = false; GK.heightRatio = 0;
+}
+
+function startGame() {
+  nShots = 0; nGoals = 0; nSaves = 0; nMiss = 0;
+  particles = []; joyLevel = 0; camShake = 0;
+  resetRound();
+  st = ST.IDLE; sndClick();
+}
+
+// ================================================================
+//  INPUT
+// ================================================================
+function getVP(e) {
+  var r = CV.getBoundingClientRect();
+  var src = e.touches ? e.touches[0] : (e.changedTouches ? e.changedTouches[0] : e);
+  return toV(src.clientX - r.left, src.clientY - r.top);
+}
+
+function onDown(e) {
+  e.preventDefault();
+  try { if (!AC) AC = new (window.AudioContext || window.webkitAudioContext)(); if (AC.state === 'suspended') AC.resume(); } catch(ex) {}
+  var p = getVP(e);
+
+  if (st === ST.SPLASH) { startGame(); return; }
+  if (st === ST.OVER) {
+    if (p.x > 108 && p.x < 372 && p.y > 637 && p.y < 701) startGame();
+    return;
+  }
+  if (st === ST.RESULT) return;
+
+  // Sound toggle
+  if (p.x > VW - 52 && p.y > 10 && p.y < 44) { muted = !muted; sndClick(); return; }
+
+  if (st === ST.IDLE) {
+    var ddx = p.x - BX0, ddy = p.y - BY0;
+    if (Math.sqrt(ddx * ddx + ddy * ddy) < ball.r * 3.8) {
+      DR.on = true; DR.x0 = p.x; DR.y0 = p.y; DR.x = p.x; DR.y = p.y;
+      st = ST.AIM;
+    }
+  }
+}
+
+function onMove(e) {
+  e.preventDefault();
+  if (st !== ST.AIM || !DR.on) return;
+  var p = getVP(e);
+  DR.x = p.x; DR.y = p.y;
+}
+
+function onUp(e) {
+  e.preventDefault();
+  if (st === ST.AIM && DR.on) doShoot();
+}
+
+CV.addEventListener('mousedown',  onDown, { passive: false });
+CV.addEventListener('mousemove',  onMove, { passive: false });
+CV.addEventListener('mouseup',    onUp,   { passive: false });
+CV.addEventListener('touchstart', onDown, { passive: false });
+CV.addEventListener('touchmove',  onMove, { passive: false });
+CV.addEventListener('touchend',   onUp,   { passive: false });
+document.addEventListener('touchmove', function(e) { e.preventDefault(); }, { passive: false });
+
+// ================================================================
+//  UPDATE (logic tick)
+// ================================================================
+function update() {
+  frame++;
+
+  // Ball flight
+  if (FLY.on && st === ST.FLY) {
+    FLY.t = Math.min(FLY.t + FLY.spd, 1);
+    var pt = computeBezierPt(FLY.p0x, FLY.p0y, FLY.p1x, FLY.p1y, FLY.p2x, FLY.p2y, FLY.t);
+    ball.x = pt.x; ball.y = pt.y;
+    ball.spin += ball.spinDir;
+    // Keeper speed: arrive at full dive before ball does
+    if (GK.diving && GK.t < 1) GK.t = Math.min(GK.t + 0.038, 1);
+    if (FLY.t >= 1 && !FLY.done) { FLY.done = true; resolveShot(); }
+  }
+
+  // Result countdown
+  if (st === ST.RESULT) {
+    resultT--;
+    if (resultT <= 0) {
+      if (nShots >= TOTAL) { st = ST.OVER; spawnConfetti(VW / 2, VH * 0.35, 90); }
+      else { resetRound(); st = ST.IDLE; }
+    }
+  }
+
+  // Particles
+  var alive = [];
+  for (var i = 0; i < particles.length; i++) {
+    var p = particles[i];
+    p.x += p.vx; p.y += p.vy;
+    p.vy += 0.14; p.life -= p.dec; p.rot += p.rv;
+    if (p.life > 0) alive.push(p);
+  }
+  particles = alive;
+
+  joyLevel  = Math.max(0, joyLevel  - 0.0022);
+  camShake  = Math.max(0, camShake  * 0.88 - 0.04);
+}
+
+// ================================================================
+//  RENDER LOOP
+// ================================================================
+function render() {
+  CX.clearRect(0, 0, cw, ch);
+  var sx = camShake > 0 ? (Math.random() - 0.5) * camShake * SC : 0;
+  var sy = camShake > 0 ? (Math.random() - 0.5) * camShake * SC : 0;
+  CX.save(); CX.translate(sx, sy);
+
+  drawSky();
+  drawClouds();
+  drawStadium();
+  drawGrass();
+  drawGoal();
+  drawKeeper();
+
+  if (st !== ST.SPLASH && st !== ST.OVER) {
+    var depth  = FLY.on ? (1 - FLY.t * 0.52) : 1;
+    var ballR  = ball.r * (0.46 + depth * 0.54);
+    drawBall(ball.x, ball.y, ballR, ball.spin, depth);
+    drawAim();
+  }
+
+  drawParticles();
+  if (st !== ST.SPLASH && st !== ST.OVER) drawHUD();
+  drawResult();
+  if (st === ST.SPLASH) drawSplash();
+  if (st === ST.OVER)   drawGameOver();
+
+  CX.restore();
+}
+
+var lastTS = 0;
+function loop(ts) {
+  requestAnimationFrame(loop);
+  if (ts - lastTS < 14) return;  // ~60 fps cap
+  lastTS = ts;
+  update();
+  render();
+}
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
